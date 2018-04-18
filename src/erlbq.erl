@@ -4,6 +4,7 @@
 %% API exports
 -export([
     %% api
+    new/1,
     new/2,
     enqueue/2,
     enqueue_cast/2,
@@ -22,9 +23,11 @@
   ]).
 
 -opaque handle() :: reference().
+-type id() :: atom() | pid().
 
 -export_type([
-    handle/0
+    handle/0,
+    id/0
   ]).
 
 -type func() :: {module(), atom(), list()}.
@@ -40,33 +43,37 @@
 %% API functions
 %%====================================================================
 
--spec new(atom(), integer()) -> {ok, pid()} | {error, any()}.
+-spec new(integer()) -> {ok, id()} | {error, any()}.
+new(Capacity) ->
+    gen_server:start_link(?MODULE, [Capacity], []).
+
+-spec new(atom(), integer()) -> {ok, id()} | {error, any()}.
 new(Name, Capacity) ->
     gen_server:start_link({local, Name}, ?MODULE, [Capacity], []).
 
--spec enqueue(atom(), any()) -> ok | full.
-enqueue(Name, Elem) ->
-    gen_server:call(Name, {enqueue, Elem}).
+-spec enqueue(id(), any()) -> ok | full.
+enqueue(Id, Elem) ->
+    gen_server:call(Id, {enqueue, Elem}).
 
--spec enqueue_cast(atom(), any()) -> ok.
-enqueue_cast(Name, Elem) ->
-    gen_server:cast(Name, {enqueue, Elem}).
+-spec enqueue_cast(id(), any()) -> ok.
+enqueue_cast(Id, Elem) ->
+    gen_server:cast(Id, {enqueue, Elem}).
 
--spec dequeue(atom()) -> {ok, any()} | empty.
-dequeue(Name) ->
-    gen_server:call(Name, dequeue).
+-spec dequeue(id()) -> {ok, any()} | empty.
+dequeue(Id) ->
+    gen_server:call(Id, dequeue).
 
--spec subscribe(atom(), func()) -> handle().
-subscribe(Name, Func) ->
-    gen_server:call(Name, {subscribe, Func}).
+-spec subscribe(id(), func()) -> handle().
+subscribe(Id, Func) ->
+    gen_server:call(Id, {subscribe, Func}).
 
--spec unsubscribe(atom(), handle()) -> ok.
-unsubscribe(Name, Handle) ->
-    gen_server:call(Name, {unsubscribe, Handle}).
+-spec unsubscribe(id(), handle()) -> ok.
+unsubscribe(Id, Handle) ->
+    gen_server:call(Id, {unsubscribe, Handle}).
 
--spec delete(atom()) -> ok.
-delete(Name) ->
-    gen_server:stop(Name).
+-spec delete(id()) -> ok.
+delete(Id) ->
+    gen_server:stop(Id).
 
 %%====================================================================
 %% Server Callbacks
@@ -85,12 +92,14 @@ handle_cast({enqueue, Elem}, State) ->
             {noreply, State}
     end.
 
--spec handle_call(
-        dequeue | {subscribe, func()} | {unsubscribe, handle()},
-        any(),
-        state()
-       ) -> {reply, Reply, state()} 
-                when Reply :: ok | full | empty | {value, any()}.
+-spec handle_call({enqueue, any()}, any(), state()) ->
+                         {reply, ok | full, state()};
+                 ({dequeue, handle()}, any(), state()) ->
+                         {reply, empty | {value, any()}, state()};
+                 ({subscribe, func()}, any(), state()) ->
+                         {reply, handle(), state()};
+                 ({unsubscribe, handle()}, any(), state())->
+                         {reply, ok, state()}.
 handle_call({enqueue, Elem}, _From, State) ->
     case enqueue_internal(State, Elem) of
         {ok, NewState} ->
@@ -102,7 +111,8 @@ handle_call(dequeue, _From, State=#state{queue=Queue}) ->
     {R, Q} = queue:out(Queue),
     {reply, R, State#state{queue=Q}};
 handle_call({subscribe, Func}, _From, State=#state{subscribers=Subs}) ->
-    {reply, ok, State#state{subscribers=Subs#{make_ref() =>  Func}}};
+    Handle = make_ref(),
+    {reply, Handle, State#state{subscribers=Subs#{Handle =>  Func}}};
 handle_call({unsubscribe, Handle}, _From, State=#state{subscribers=Subs}) ->
     {reply, ok, State#state{subscribers=maps:remove(Handle, Subs)}}.
 
@@ -126,7 +136,10 @@ code_change(_OldVsn, State, _Extra) ->
 %%====================================================================
 
 -spec enqueue_internal(state(), any()) -> {ok, state()} | full.
-enqueue_internal(State=#state{capacity=Cap, queue=Queue, subscribers=Subs}, Elem) ->
+enqueue_internal(
+  State=#state{capacity=Cap, queue=Queue, subscribers=Subs},
+  Elem
+ ) ->
     case queue:len(Queue) < Cap of
         true ->
             [erlang:apply(M, F, A) || {M, F, A} <- maps:values(Subs)],
